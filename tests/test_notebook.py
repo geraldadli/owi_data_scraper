@@ -26,6 +26,32 @@ class PipelineTests(unittest.TestCase):
         d = self.n["derive_features"](pd.DataFrame(records))
         return d.merge(self.n["coordination_features"](d), on="global_user_id", how="left")
 
+    def test_three_column_scraping_export_all_platforms(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old = {k: self.n.get(k) for k in ["CANONICAL", "FEATURES"]}
+            self.n.update(CANONICAL=Path(folder), FEATURES=Path(folder))
+            try:
+                for platform in ("youtube", "tiktok", "instagram", "x", "facebook"):
+                    frame = pd.DataFrame([
+                        self.record(platform=platform, like_count=0, reply_count=None,
+                                    created_at="2026-01-01T07:00:00+07:00"),
+                        self.record(platform=platform, comment="d", like_count=12,
+                                    reply_count=3, created_at=None),
+                    ])
+                    self.n["save_canonical"](frame, platform)
+                    out = self.n["load_canonical"](platform)
+                    self.assertEqual(list(out.columns), ["like_count", "reply_count", "date_published"])
+                    self.assertEqual(out.like_count.iloc[0], 0)
+                    self.assertTrue(pd.isna(out.reply_count.iloc[0]))
+                    self.assertEqual(pd.Timestamp(out.date_published.iloc[0]), pd.Timestamp("2026-01-01T00:00:00Z"))
+                    self.assertTrue(pd.isna(out.date_published.iloc[1]))
+                combined = self.n["assemble_scraped_data"]()
+                self.assertEqual(len(combined), 10)
+                self.assertEqual(list(combined.columns), ["like_count", "reply_count", "date_published"])
+                self.assertFalse((Path(folder)/"dataset_accounts.csv").exists())
+            finally:
+                self.n.update(old)
+
     def test_every_cell_compiles(self):
         nb = json.loads((Path(__file__).resolve().parents[1]/"buzzer.ipynb").read_text(encoding="utf-8"))
         for i, cell in enumerate(nb["cells"]):

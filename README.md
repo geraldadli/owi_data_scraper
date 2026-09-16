@@ -165,3 +165,13 @@ collecting/publishing data.
 ## Not committed
 
 `.env` (API keys/tokens) and `buzzer_data/` (raw collected data) are gitignored and stay local.
+
+## Current scraping output
+
+All five platforms export exactly `like_count`, `reply_count`, and `date_published`
+(comment publication time, UTC) to `buzzer_data/canonical/<platform>.csv`.
+Section 7 combines these into `buzzer_data/features/dataset.csv` with the same columns.
+Unknown values remain `\N`, not zero. Profile enrichment and legacy account-feature/public
+exports are skipped. Raw payload archives remain local for deduplication and rebuilding;
+existing historical exports are not deleted. Earlier account-baseline documentation describes
+legacy functions, not the current three-column output.
