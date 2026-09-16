@@ -46,7 +46,7 @@ If comments are blocked while logged out, log in **inside the Chromium window op
 the notebook**. Your regular browser's login is separate. The collector returns to the video
 after the initial login prompt. If no comments are captured, open the comment panel and scroll
 manually once, then press Enter in the notebook to retry; type `s` to skip that video.
-Automatic scrolling starts only after comment data is observed. Zero captured comments can
+Scrolling starts after comment data is observed or an Instagram comment panel is detected. Zero captured comments can
 also mean an empty/unavailable video or a changed endpoint, not necessarily a login problem.
 Sessions persist in `buzzer_data/browser_profile/<platform>/`.
 
@@ -54,27 +54,32 @@ For Instagram, open the video's comment panel before continuing. The collector s
 that container directly. If it cannot identify the panel, it stops with an error instead
 of scrolling through other Reels or posts.
 Instagram captures REST and GraphQL comment responses, including threaded replies.
-When nothing has been captured yet, it tries scrolling the visible panel to trigger loading.
+When nothing has been captured yet, detecting the visible panel starts scrolling to trigger loading.
+After login, an already-open target is preserved instead of reloaded and its comment count reset.
 At the prompt, Enter retries, `r` reloads the video (reopen its comments afterward), and `s` skips.
 Visible comments with no capture do not necessarily mean you need to log in.
 
-### X account setup
+### Automatic login
 
-The template includes optional `X_USERNAME` and `X_PASSWORD` placeholders. These are
-manual-login reference fields, not automatic-login settings; leaving them empty is fine.
-Instagram uses `INSTAGRAM_USERNAME` / `INSTAGRAM_PASSWORD` placeholders; Facebook uses
-`FACEBOOK_EMAIL` / `FACEBOOK_PASSWORD`. These are also manual-login references only.
-Keep real credentials in `.env` or your password manager, never in the notebook or example file.
+The notebook reuses saved sessions, then tries these `.env` credentials once if needed:
 
-1. When the X Chromium window opens, use X's **Log in** button.
-2. Enter your account details there and complete any verification or 2FA.
-3. Press Enter in the notebook. It returns to the target post; open its replies if prompted.
+- Instagram: `INSTAGRAM_USERNAME`, `INSTAGRAM_PASSWORD`
+- Facebook: `FACEBOOK_EMAIL`, `FACEBOOK_PASSWORD`
+- X: `X_USERNAME`, `X_PASSWORD`
 
-The saved session in `buzzer_data/browser_profile/x/` is reused on later runs until X expires it.
+Leave credentials blank for manual login. TikTok login remains manual.
+If login fails or 2FA, CAPTCHA, consent, or an extra identity check appears, complete it
+in the opened browser and press Enter in the notebook. The collector returns to the video.
+Credentials are never printed; login responses are excluded from capture during the attempt.
+Keep real credentials only in the gitignored `.env`, never in `.env.example` or the notebook.
+Restart the kernel after changing credentials (existing environment values take precedence).
 
 ## Output
 
 Each exported row represents one comment or reply, with exactly these columns:
+
+Reply threads are expanded while scrolling, including Instagram's “Lihat semua 3 balasan”
+buttons. Replies count toward the same per-video `MAX_COMMENTS` cap as top-level comments.
 
 | Column | Meaning |
 | --- | --- |
@@ -87,6 +92,7 @@ Each exported row represents one comment or reply, with exactly these columns:
 Per-platform files: `buzzer_data/canonical/<platform>.csv`.
 Combined file: `buzzer_data/features/dataset.csv`.
 Missing values use `\N`, not zero. Facebook total reactions are not treated as likes.
+Reply counts stay missing when the platform does not supply them; @mentions do not infer counts.
 Comment IDs are used internally for deduplication, but are not exported.
 Names come from comment responses; missing names remain null. Display names are not unique account IDs.
 Rerun browser parsing and export to restore text/names from existing raw payloads.

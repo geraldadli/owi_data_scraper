@@ -1,4 +1,6 @@
 import json
+import os
+import re
 import tempfile
 import unittest
 import traceback
@@ -64,6 +66,53 @@ class PipelineTests(unittest.TestCase):
         missing = n['parse_instagram']({'payload': {'comments': [{'pk': '1', 'text': 'hello'}]}})[0]
         self.assertIsNone(missing['username'])
 
+    def test_env_login_success_fallback_and_secret_redaction(self):
+        credentials = dict(INSTAGRAM_USERNAME='dummy', INSTAGRAM_PASSWORD='secret-test',
+                           FACEBOOK_EMAIL='dummy@example.com', FACEBOOK_PASSWORD='secret-test',
+                           X_USERNAME='dummy', X_PASSWORD='secret-test')
+        with patch.dict(os.environ, credentials, clear=True):
+            for platform in ('instagram', 'facebook', 'x'):
+                h = self.n['Harvester'](platform)
+                h.page = Mock()
+                h.page.locator.return_value.first.is_visible.return_value = False
+                h.page.goto.side_effect = lambda url, **kw: setattr(h.page, 'url', url)
+                self.assertTrue(h.login_from_env())
+                self.assertEqual(h.page.locator.return_value.first.fill.call_count, 2)
+                self.assertFalse(h._logging_in)
+                h.page.locator.return_value.first.fill.side_effect = RuntimeError('secret-test')
+                with patch('builtins.print') as output:
+                    self.assertFalse(h.login_from_env())
+                self.assertNotIn('secret-test', str(output.call_args_list))
+                self.assertFalse(h._logging_in)
+                h.page.locator.return_value.first.fill.reset_mock(side_effect=True)
+                h.page.goto.side_effect = lambda url, **kw: setattr(h.page, 'url', 'https://unrelated.example/login')
+                self.assertFalse(h.login_from_env())
+                h.page.locator.return_value.first.fill.assert_not_called()
+                h.page.locator.return_value.first.is_visible.return_value = True
+                h.page.goto.reset_mock()
+                self.assertTrue(h.login_from_env())
+                h.page.goto.assert_not_called()
+        with patch.dict(os.environ, {}, clear=True):
+            h.page.locator.return_value.first.is_visible.return_value = False
+            self.assertFalse(h.login_from_env())
+            h.page.goto.assert_not_called()
+        h._logging_in = True
+        h._on_response(SimpleNamespace())
+        self.assertEqual(h.captured, [])
+
+    def test_instagram_reply_mentions_do_not_replace_missing_counts(self):
+        rows = [self.n['empty_record'](post_id='a', thread_id='top', parent_comment_id='top',
+                    username='alice', comment_text='hello'),
+                self.n['empty_record'](post_id='b', thread_id='top', parent_comment_id='top',
+                    username='bob', comment_text='@alice yes', reply_count=0)]
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.dict(self.n, CANONICAL=Path(folder)):
+                path = self.n['save_canonical'](self.n['to_frame'](rows), 'instagram')
+                restored = self.n['load_canonical']('instagram')
+                self.assertTrue(pd.isna(restored.reply_count.iloc[0]))
+                self.assertEqual(restored.reply_count.iloc[1], 0)
+                self.assertIn('\\N', path.read_text())
+
     def test_every_cell_compiles(self):
         nb = json.loads((Path(__file__).resolve().parents[1] / 'buzzer.ipynb').read_text(encoding='utf-8'))
         for i, cell in enumerate(nb['cells']):
@@ -71,12 +120,14 @@ class PipelineTests(unittest.TestCase):
                 compile(''.join(cell['source']), f'cell-{i}', 'exec')
 
     def test_all_video_lists_and_no_account_scrapers(self):
-        expected = {'tiktok': 12, 'x': 11, 'instagram': 11, 'youtube': 12, 'facebook': 10}
-        self.assertEqual({p: len(urls) for p, urls in self.n['VIDEO_URLS'].items()}, expected)
+        configured = self.n['VIDEO_URLS']
+        self.assertEqual(set(configured), {'tiktok', 'x', 'instagram', 'youtube', 'facebook'})
         urls = [url for group in self.n['VIDEO_URLS'].values() for url in group]
-        self.assertEqual(len(set(urls)), 56)
-        self.assertEqual(len(self.n['BROWSER_TARGETS']), 44)
-        self.assertEqual(len(self.n['YT_VIDEO_IDS']), 12)
+        self.assertEqual(len(set(urls)), len(urls))
+        self.assertEqual({(t['platform'], t['url']) for t in self.n['BROWSER_TARGETS']},
+                         {(p, url) for p, group in configured.items() if p != 'youtube' for url in group})
+        self.assertEqual(self.n['YT_VIDEO_IDS'],
+                         [self.n['source_post_id']('youtube', url) for url in configured['youtube']])
         for removed in ('yt_enrich_channels', 'enrich_tiktok_profiles', 'enrich_instagram_profiles',
                         'aggregate_accounts', 'BaselinePreprocessor', 'PROFILE_ENDPOINTS'):
             self.assertNotIn(removed, self.n)
@@ -139,11 +190,34 @@ class PipelineTests(unittest.TestCase):
 
     def test_instagram_visible_panel_triggers_capture_before_prompt(self):
         h = SimpleNamespace(platform='instagram', page=Mock(),
-                            _coverage_snapshot=Mock(side_effect=[(0, None), (1, None)]),
+                            _coverage_snapshot=Mock(return_value=(0, None)),
                             _scroll_instagram_comments=Mock(return_value=True))
         with ThreadPoolExecutor(max_workers=1) as ex, patch('builtins.input', side_effect=AssertionError('unnecessary login prompt')):
             self.assertTrue(self.n['wait_for_comment_access'](ex, h))
         h._scroll_instagram_comments.assert_called_once_with(required=False)
+
+    def test_browser_login_preserves_comments_on_current_target(self):
+        n = load_notebook()
+        target = 'https://www.instagram.com/p/POST/'
+        h = Mock()
+        h.start.return_value = h
+        h.page.url = target
+        h.login_from_env.return_value = False
+        h._seen_ids = {'1'}
+        h.capture_session = 'session'
+        h.stop_reason = 'cap'
+        h.scroll_until_coverage.return_value = (1, None)
+        n.update(Harvester=Mock(return_value=h), ThreadPoolExecutor=ThreadPoolExecutor,
+                 wait_for_comment_access=Mock(return_value=True), jsonl_append=Mock(),
+                 RAW=Path('.'), SESSION_SEEN={})
+        with patch('builtins.input', return_value=''):
+            n['run_browser_collection']([{'platform': 'instagram', 'url': target}])
+        h.open.assert_called_once_with(target, 500)
+        h.open.reset_mock()
+        h.page.url = 'https://www.instagram.com/'
+        with patch('builtins.input', return_value=''):
+            n['run_browser_collection']([{'platform': 'instagram', 'url': target}])
+        self.assertEqual(h.open.call_count, 2)
 
     def test_x_excludes_root_quotes_and_unrelated_tweets(self):
 
@@ -196,6 +270,24 @@ class PipelineTests(unittest.TestCase):
                 prompt.assert_called_once()
             with patch('builtins.input', side_effect=AssertionError('unnecessary prompt')):
                 self.assertTrue(n['wait_for_comment_access'](ex, h))
+
+    def test_instagram_expands_replies_before_scrolling_and_cap(self):
+        pattern = self.n['REPLY_BUTTON_PATTERNS']['instagram']
+        for label in ('Lihat semua 3 balasan', 'Lihat balasan', 'View replies (3)', 'View all 12 replies'):
+            self.assertIsNotNone(re.search(pattern, label, re.I))
+        for label in ('Balas', 'Reply', 'Hide replies', 'Sembunyikan balasan'):
+            self.assertIsNone(re.search(pattern, label, re.I))
+        h = self.n['Harvester']('instagram')
+        events = []
+        h._at_cap = Mock(side_effect=[False, True])
+        h.expand_replies = Mock(side_effect=lambda **kw: events.append('replies'))
+        h._scroll_instagram_comments = Mock(side_effect=lambda: events.append('scroll'))
+        h.scroll_comments(max_rounds=1, pause_ms=0, expand_replies=True)
+        self.assertEqual(events, ['replies'])
+        h._at_cap = Mock(return_value=False)
+        h._wait_for_growth = Mock()
+        h.scroll_comments(max_rounds=1, pause_ms=0, expand_replies=True)
+        self.assertEqual(events, ['replies', 'replies', 'scroll'])
 
     def test_instagram_scroll_never_uses_feed_wheel(self):
         h = self.n['Harvester']('instagram')
