@@ -22,7 +22,7 @@ class PipelineTests(unittest.TestCase):
         values.update(extra)
         return self.n['empty_record'](**values)
 
-    def test_five_column_scraping_export_all_platforms(self):
+    def test_full_comment_schema_export_all_platforms(self):
         with tempfile.TemporaryDirectory() as folder:
             old = {k: self.n.get(k) for k in ['CANONICAL', 'FEATURES']}
             self.n.update(CANONICAL=Path(folder), FEATURES=Path(folder))
@@ -31,7 +31,7 @@ class PipelineTests(unittest.TestCase):
                     frame = pd.DataFrame([self.record(platform=platform, like_count=0, reply_count=None, created_at='2026-01-01T07:00:00+07:00'), self.record(platform=platform, comment='d', like_count=12, reply_count=3, created_at=None)])
                     self.n['save_canonical'](frame, platform)
                     out = self.n['load_canonical'](platform)
-                    self.assertEqual(list(out.columns), ['username', 'comment_text', 'like_count', 'reply_count', 'date_published'])
+                    self.assertEqual(list(out.columns), ['platform', 'video_id', 'comment_id', 'parent_comment_id', 'username', 'comment_text', 'post_text', 'like_count', 'reply_count', 'date_published', 'bias_label'])
                     self.assertEqual(out.username.iloc[0], "00123")
                     self.assertEqual(out.comment_text.iloc[0], 'NA, quoted "text"\nsecond line')
                     self.assertEqual(out.like_count.iloc[0], 0)
@@ -40,7 +40,7 @@ class PipelineTests(unittest.TestCase):
                     self.assertTrue(pd.isna(out.date_published.iloc[1]))
                 combined = self.n['assemble_scraped_data']()
                 self.assertEqual(len(combined), 10)
-                self.assertEqual(list(combined.columns), ['username', 'comment_text', 'like_count', 'reply_count', 'date_published'])
+                self.assertEqual(list(combined.columns), ['platform', 'video_id', 'comment_id', 'parent_comment_id', 'username', 'comment_text', 'post_text', 'like_count', 'reply_count', 'date_published', 'bias_label'])
                 self.assertFalse((Path(folder) / 'dataset_accounts.csv').exists())
             finally:
                 self.n.update(old)
@@ -112,6 +112,110 @@ class PipelineTests(unittest.TestCase):
                 self.assertTrue(pd.isna(restored.reply_count.iloc[0]))
                 self.assertEqual(restored.reply_count.iloc[1], 0)
                 self.assertIn('\\N', path.read_text())
+
+    def test_context_and_ids_survive_csv_without_invented_labels(self):
+        n = self.n
+        long_id = '001234567890123456789'
+        records = [n['empty_record'](post_id=long_id, source_post_id='000123',
+                    parent_comment_id='000456', username='alice', comment_text='a reply',
+                    post_text='Caption, with\na newline', reply_count=None)]
+        with tempfile.TemporaryDirectory() as folder, patch.dict(n, CANONICAL=Path(folder), FEATURES=Path(folder)):
+            n['save_canonical'](n['to_frame'](records), 'instagram')
+            out = n['assemble_scraped_data'](('instagram',))
+            self.assertEqual(out.comment_id.iloc[0], long_id)
+            self.assertEqual(out.video_id.iloc[0], '000123')
+            self.assertEqual(out.parent_comment_id.iloc[0], '000456')
+            self.assertEqual(out.platform.iloc[0], 'instagram')
+            self.assertEqual(out.post_text.iloc[0], 'Caption, with\na newline')
+            self.assertTrue(pd.isna(out.bias_label.iloc[0]))
+            self.assertTrue(pd.isna(out.reply_count.iloc[0]))
+            out.loc[0, 'bias_label'] = 'reviewed'
+            self.assertEqual(n['scraping_columns'](out).bias_label.iloc[0], 'reviewed')
+        for platform in ('instagram', 'facebook'):
+            payload = {'comments': [{'pk': 'c', 'text': 'hello'}]} if platform == 'instagram' else {
+                '__typename': 'Comment', 'id': 'c', 'body': {'text': 'hello'}, 'author': {}}
+            url = 'https://instagram.com/p/SHORT/' if platform == 'instagram' else 'https://facebook.com/reel/123/'
+            parsed = n['parse_' + platform]({'payload': payload, '_page_url': url, '_post_text': 'Original caption'})[0]
+            self.assertEqual(parsed['source_post_id'], 'SHORT' if platform == 'instagram' else '123')
+            self.assertEqual(parsed['post_text'], 'Original caption')
+
+    def test_media_comments_and_only_media_parent_threads_are_excluded(self):
+        n = self.n
+        make = n['empty_record']
+        rows = [make(post_id='root', source_post_id='v', _has_media=True),
+                make(post_id='reply', source_post_id='v', parent_comment_id='root'),
+                make(post_id='nested', source_post_id='v', parent_comment_id='reply'),
+                make(post_id='text', source_post_id='v', comment_text='hello'),
+                make(post_id='gifreply', source_post_id='v', parent_comment_id='text', _has_media=True),
+                make(post_id='keep', source_post_id='v', parent_comment_id='gifreply', comment_text='text reply'),
+                make(post_id='root', source_post_id='other', comment_text='another video')]
+        out = n['to_frame'](list(reversed(rows)))
+        self.assertEqual(set(zip(out.source_post_id, out.post_id)), {('v', 'text'), ('v', 'keep'), ('other', 'root')})
+        self.assertNotIn('_has_media', n['scraping_columns'](out).columns)
+        for platform, payload in [
+            ('instagram', {'comments': [{'pk': 'root', 'giphy_media_info': {'id': 'gif'},
+                'preview_child_comments': [{'pk': 'reply', 'text': 'reply'}]}]}),
+            ('tiktok', {'comments': [{'cid': 'root', 'text': '', 'image_list': [{'url': 'image'}],
+                'reply_comment': [{'cid': 'reply', 'text': 'reply'}]}]}),
+            ('facebook', {'__typename': 'Comment', 'id': 'root', 'author': {}, 'attachments': [{'media': {}}],
+                'replies': [{'__typename': 'Comment', 'id': 'reply', 'body': {'text': 'reply'},
+                    'author': {}, 'parent_comment': {'id': 'root'}}]}),
+        ]:
+            parsed = n['parse_' + platform]({'payload': payload})
+            self.assertEqual(len(parsed), 2)
+            self.assertTrue(n['to_frame'](parsed).empty, platform)
+        self.assertFalse(n['comment_has_media']({'text': 'I like GIFs 😀',
+            'user': {'profile_pic_url': 'avatar'}, 'giphy_media_info': None}))
+        self.assertTrue(n['comment_has_media']({'extended_entities': {'media': [{'type': 'animated_gif'}]}}))
+
+    def test_tiktok_late_caption_is_archived_and_shared_only_with_same_video(self):
+        n = load_notebook()
+        h = n['Harvester']('tiktok')
+        h.target_url = 'https://www.tiktok.com/@u/video/123'
+        h.page = Mock()
+        h._read_post_text = Mock(return_value='Actual caption #news')
+        row = {'_platform': 'tiktok', '_page_url': h.target_url,
+               'payload': {'comments': [{'cid': 'new', 'text': 'new comment'}]}}
+        h.captured = [row]
+        with tempfile.TemporaryDirectory() as folder, patch.dict(n, RAW=Path(folder), CANONICAL=Path(folder)):
+            older = {'_platform': 'tiktok', '_page_url': h.target_url,
+                     'payload': {'comments': [{'cid': 'old', 'text': 'old comment'}]}}
+            other = {'_platform': 'tiktok', '_page_url': 'https://www.tiktok.com/@u/video/456',
+                     'payload': {'comments': [{'cid': 'other', 'text': 'other comment'}]}}
+            n['jsonl_append'](Path(folder) / 'tiktok_payloads.jsonl', [older, other])
+            h.flush()
+            out = n['build_browser_canonical']('tiktok').set_index('post_id')
+            self.assertEqual(out.loc['old', 'post_text'], 'Actual caption #news')
+            self.assertEqual(out.loc['new', 'post_text'], 'Actual caption #news')
+            self.assertTrue(pd.isna(out.loc['other', 'post_text']))
+
+    def test_tiktok_reply_pagination_excludes_hide_and_stops_on_blocked_threads(self):
+        n = self.n
+        pattern = n['REPLY_BUTTON_PATTERNS']['tiktok']
+        for label in ('View 68 replies', 'View 65 more replies', 'View more replies (65)',
+                      'Lihat 65 balasan lainnya', 'Lihat balasan (68)', 'Lihat 32 lainnya', 'Lihat 1 lainnya'):
+            self.assertIsNotNone(re.search(pattern, label, re.I))
+        for label in ('Hide replies', 'Sembunyikan balasan', 'Sembunyikan', 'Reply', 'Balas', 'Jawab'):
+            self.assertIsNone(re.search(pattern, label, re.I))
+        h = n['Harvester']('tiktok')
+        h.page = Mock()
+        controls = h.page.locator.return_value.filter.return_value
+        controls.count.return_value = 1
+        h._drain_reply_thread = Mock(side_effect=RuntimeError('stale control'))
+        with self.assertRaisesRegex(RuntimeError, 'collection stopped'):
+            h.expand_replies(max_clicks=5)
+        h.page.mouse.wheel.assert_not_called()
+        h._drain_reply_thread = Mock(return_value=25)
+        controls.count.side_effect = [1, 0, 0, 0]
+        h._at_cap = Mock(return_value=True)
+        self.assertEqual(h.expand_replies(max_clicks=1000), 25)
+        rows = [n['empty_record'](post_id='root', source_post_id='v', thread_id='root', reply_count=68),
+                n['empty_record'](post_id='a', source_post_id='v', thread_id='root', parent_comment_id='root'),
+                n['empty_record'](post_id='b', source_post_id='v', thread_id='root', parent_comment_id='a')]
+        with patch('builtins.print'):
+            gaps = n['report_tiktok_reply_gaps'](n['to_frame'](rows))
+        self.assertEqual(gaps, [('root', 2, 68)])
+        self.assertEqual(rows[0]['reply_count'], 68)
 
     def test_every_cell_compiles(self):
         nb = json.loads((Path(__file__).resolve().parents[1] / 'buzzer.ipynb').read_text(encoding='utf-8'))
@@ -238,7 +342,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_coverage_is_incremental_and_resets_per_target(self):
         h = self.n['Harvester']('tiktok')
-        h.page = SimpleNamespace(goto=lambda *a, **kw: None, wait_for_timeout=lambda *a: None)
+        h.page = SimpleNamespace(goto=lambda *a, **kw: None, wait_for_timeout=lambda *a: None, evaluate=lambda *a: "Post caption")
 
         def payload(cid):
             return {'payload': {'comments': [{'cid': cid, 'text': 'x'}], 'total': 10}, '_url': '/api/comment/list'}
@@ -315,6 +419,10 @@ class PipelineTests(unittest.TestCase):
 
         class API:
 
+            def videos(self):
+                return SimpleNamespace(list=lambda **kw: SimpleNamespace(execute=lambda: {
+                    'items': [{'snippet': {'title': 'Post title', 'description': 'Post description'}}]}))
+
             def commentThreads(self):
                 return SimpleNamespace(list=lambda **kw: SimpleNamespace(execute=lambda: {'items': [top]}))
 
@@ -332,6 +440,7 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(all((c['parentId'] == 'top' for c in calls)))
         norm = [self.n['yt_normalise'](r) for r in raw]
         self.assertEqual(norm[0]['post_id'], 'top')
+        self.assertEqual(norm[0]['post_text'], 'Post title\n\nPost description')
         self.assertTrue(all((r['thread_id'] == 'top' for r in norm)))
         self.assertEqual(len(self.n['yt_fetch']('video', 1, yt=API())), 1)
 
@@ -358,6 +467,10 @@ class PipelineTests(unittest.TestCase):
         class API:
             reply_error = 'commentsDisabled'
 
+            def videos(self):
+                return SimpleNamespace(list=lambda **kw: SimpleNamespace(execute=lambda: {
+                    'items': [{'snippet': {'title': 'Post title', 'description': 'Post description'}}]}))
+
             def commentThreads(self):
                 def query(**kw):
                     vid = kw['videoId']
@@ -381,7 +494,7 @@ class PipelineTests(unittest.TestCase):
             csv = path / 'youtube.csv'
             previous = csv.read_bytes()
             self.assertEqual(list(n['load_canonical']('youtube').columns),
-                             ['username', 'comment_text', 'like_count', 'reply_count', 'date_published'])
+                             ['platform', 'video_id', 'comment_id', 'parent_comment_id', 'username', 'comment_text', 'post_text', 'like_count', 'reply_count', 'date_published', 'bias_label'])
             n['YT_VIDEO_IDS'] = ['missing']
             self.assertIsNone(n['run_youtube_collection']())
             self.assertEqual(csv.read_bytes(), previous)
@@ -405,6 +518,13 @@ class PipelineTests(unittest.TestCase):
                 self.n['jsonl_append'](Path(folder) / 'tiktok_payloads.jsonl', rows)
                 d = self.n['build_browser_canonical']('tiktok')
                 self.assertEqual(len(d), 1)
+                rows[0]['_complete_reply_threads'] = True
+                for comment in rows[0]['payload']['comments'][1:]:
+                    comment['reply_id'] = '1'
+                self.n['jsonl_append'](Path(folder) / 'tiktok_payloads.jsonl', rows[:1])
+                d = self.n['build_browser_canonical']('tiktok')
+                self.assertEqual(len(d), 3)
+                self.assertEqual(d.parent_comment_id.notna().sum(), 2)
             finally:
                 self.n.update(old)
 

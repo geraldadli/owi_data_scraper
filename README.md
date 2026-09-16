@@ -39,8 +39,9 @@ videos remain in the local raw archive. Error tracebacks omit the API request UR
 3. Run the cells from top to bottom. For browser platforms, log in when prompted and press Enter in the notebook to continue.
 4. Open `buzzer_data/features/dataset.csv` after collection and export finish.
 
-Browser collection stops at the comment cap, when no new comments load, or at the batch limit.
-The cap is a maximum, not a guaranteed number of comments.
+Browser collection stops when no new comments load, at the batch limit, or at the comment limit.
+For TikTok/Instagram, `MAX_COMMENTS` is a stopping threshold: loaded reply threads finish first,
+so the CSV can exceed it. Other platforms retain a hard cap.
 
 If comments are blocked while logged out, log in **inside the Chromium window opened by
 the notebook**. Your regular browser's login is separate. The collector returns to the video
@@ -78,22 +79,50 @@ Restart the kernel after changing credentials (existing environment values take 
 
 Each exported row represents one comment or reply, with exactly these columns:
 
+Comments containing GIFs, stickers, images, video, audio or other detected attachments are
+excluded. A top-level media comment also excludes its entire reply thread. A media reply
+excludes only that row. Plain text and emoji remain eligible. No media column is exported.
+Filtering uses attachment metadata supplied by the platform; undetected media cannot be filtered.
+
 Reply threads are expanded while scrolling, including Instagram's “Lihat semua 3 balasan”
-buttons. Replies count toward the same per-video `MAX_COMMENTS` cap as top-level comments.
+buttons. TikTok/Instagram finish each opened parent thread before moving on, including delayed
+“view more” controls below its loaded replies. They stop with an error if a thread cannot be
+isolated/continued or reaches the 1,000-click ceiling, rather than scrolling past it.
+New captures retain completed thread replies beyond `MAX_COMMENTS`; old archives keep their original cap.
 
 | Column | Meaning |
 | --- | --- |
+| `platform` | Source social platform |
+| `video_id` | Source video/post ID; Instagram uses its URL shortcode |
+| `comment_id` | Platform comment ID, kept as text |
+| `parent_comment_id` | Parent comment ID for replies; `\N` for top-level comments |
 | `username` | Author handle when supplied; YouTube/Facebook may supply a display name |
 | `comment_text` | Original comment or reply text |
+| `post_text` | Available source caption/title/description for context |
 | `like_count` | Likes on the comment, when available |
 | `reply_count` | Replies to the comment, when available |
 | `date_published` | Comment publication time in UTC |
+| `bias_label` | Initially `\N`; assigned during manual labeling |
 
 Per-platform files: `buzzer_data/canonical/<platform>.csv`.
 Combined file: `buzzer_data/features/dataset.csv`.
 Missing values use `\N`, not zero. Facebook total reactions are not treated as likes.
 Reply counts stay missing when the platform does not supply them; @mentions do not infer counts.
-Comment IDs are used internally for deduplication, but are not exported.
+TikTok's reported `reply_count` can cover a whole thread, while `parent_comment_id` links
+to the immediate parent (which may itself be a reply). Their counts need not match.
+Reply expansion avoids “Hide replies” controls and continues through “View more replies”.
+Export reports incomplete TikTok threads after the collection cap and media exclusions;
+it never changes platform totals or fabricates missing replies.
+Use `(platform, video_id, comment_id)` to identify rows across platforms. IDs are exported as text.
+YouTube collects the title and description with one metadata request per collected video.
+Browser runs retain the page's Open Graph description; X also uses the original post text
+when it appears in the captured response. Descriptions may include platform boilerplate.
+TikTok prioritizes the matching video's embedded caption, then its visible caption, before
+falling back to Open Graph. It retries before archiving to catch captions loaded after login.
+Once captured, that caption also fills missing context on archived comments from the same video.
+Unavailable context remains `\N`. Older raw archives may have IDs but no caption metadata.
+Rerun parsing/export for IDs; collect again to obtain missing post context.
+Keep manually labeled datasets in a separate file: collection/export regenerates the scraper CSVs.
 Names come from comment responses; missing names remain null. Display names are not unique account IDs.
 Rerun browser parsing and export to restore text/names from existing raw payloads.
 Existing three-column CSVs cannot recover those fields themselves; rerun YouTube collection for YouTube.
