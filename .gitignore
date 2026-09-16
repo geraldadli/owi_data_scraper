@@ -2,3 +2,4 @@
 buzzer_data/
 __pycache__/
 *.pyc
+*.inspect.ndjson

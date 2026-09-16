@@ -26,6 +26,7 @@ def load_notebook():
         "BASELINE_SCHEMA", "BASELINE_PROPERTIES", "BASELINE_RENAME", "BASELINE_STATUS_VALUES",
         "LEGACY_BASELINE_ACCOUNT_FEATURE_COLUMNS",
         "PROFILE_AUDIT_FIELDS",
+        "EXPORT_COLUMNS", "VIDEO_URLS", "MAX_COMMENTS", "YT_VIDEO_IDS", "YT_MAX_PER_VIDEO", "BROWSER_TARGETS",
     }
     for cell in nb["cells"]:
         if cell["cell_type"] != "code":
