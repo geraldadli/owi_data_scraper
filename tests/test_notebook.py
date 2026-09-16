@@ -2,6 +2,8 @@ import json
 import tempfile
 import unittest
 import traceback
+from unittest.mock import patch, Mock
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 import pandas as pd
@@ -14,11 +16,11 @@ class PipelineTests(unittest.TestCase):
         cls.n = load_notebook()
 
     def record(self, user='u', comment='c', platform='youtube', source='video1', **extra):
-        values = dict(user_id=user, post_id=comment, _platform=platform, source_post_id=source, thread_id=comment, text_content='a sufficiently long message', clean_text='message', _collected_at='2026-01-02T00:00:00Z', created_at='2026-01-01T00:00:00Z', is_reply=False, media_types=['text'])
+        values = dict(username='00123', comment_text='NA, quoted "text"\nsecond line', user_id=user, post_id=comment, _platform=platform, source_post_id=source, thread_id=comment, text_content='a sufficiently long message', clean_text='message', _collected_at='2026-01-02T00:00:00Z', created_at='2026-01-01T00:00:00Z', is_reply=False, media_types=['text'])
         values.update(extra)
         return self.n['empty_record'](**values)
 
-    def test_three_column_scraping_export_all_platforms(self):
+    def test_five_column_scraping_export_all_platforms(self):
         with tempfile.TemporaryDirectory() as folder:
             old = {k: self.n.get(k) for k in ['CANONICAL', 'FEATURES']}
             self.n.update(CANONICAL=Path(folder), FEATURES=Path(folder))
@@ -27,17 +29,40 @@ class PipelineTests(unittest.TestCase):
                     frame = pd.DataFrame([self.record(platform=platform, like_count=0, reply_count=None, created_at='2026-01-01T07:00:00+07:00'), self.record(platform=platform, comment='d', like_count=12, reply_count=3, created_at=None)])
                     self.n['save_canonical'](frame, platform)
                     out = self.n['load_canonical'](platform)
-                    self.assertEqual(list(out.columns), ['like_count', 'reply_count', 'date_published'])
+                    self.assertEqual(list(out.columns), ['username', 'comment_text', 'like_count', 'reply_count', 'date_published'])
+                    self.assertEqual(out.username.iloc[0], "00123")
+                    self.assertEqual(out.comment_text.iloc[0], 'NA, quoted "text"\nsecond line')
                     self.assertEqual(out.like_count.iloc[0], 0)
                     self.assertTrue(pd.isna(out.reply_count.iloc[0]))
                     self.assertEqual(pd.Timestamp(out.date_published.iloc[0]), pd.Timestamp('2026-01-01T00:00:00Z'))
                     self.assertTrue(pd.isna(out.date_published.iloc[1]))
                 combined = self.n['assemble_scraped_data']()
                 self.assertEqual(len(combined), 10)
-                self.assertEqual(list(combined.columns), ['like_count', 'reply_count', 'date_published'])
+                self.assertEqual(list(combined.columns), ['username', 'comment_text', 'like_count', 'reply_count', 'date_published'])
                 self.assertFalse((Path(folder) / 'dataset_accounts.csv').exists())
             finally:
                 self.n.update(old)
+
+    def test_author_and_text_survive_all_platform_parsers(self):
+        n = self.n
+        rows = [
+            n['parse_tiktok']({'payload': {'comments': [{'cid': '1', 'text': 'hello', 'user': {'unique_id': 'alice'}}]}})[0],
+            n['parse_instagram']({'payload': {'comments': [{'pk': '1', 'text': 'hello', 'user': {'username': 'alice'}}]}})[0],
+            n['parse_x']({'_page_url': 'https://x.com/u/status/1', 'payload': {
+                'rest_id': '2', 'legacy': {'full_text': 'truncated', 'conversation_id_str': '1'},
+                'note_tweet': {'note_tweet_results': {'result': {'text': 'hello'}}},
+                'core': {'user_results': {'result': {'core': {'screen_name': 'alice'}}}}}})[0],
+            n['parse_facebook']({'payload': {'__typename': 'Comment', 'id': '1',
+                'body': {'text': 'hello'}, 'author': {'name': 'alice'}}})[0],
+            n['yt_normalise']({'_kind': 'reply', '_video_id': '1', 'item': {'id': '2',
+                'snippet': {'textOriginal': 'hello', 'authorDisplayName': 'alice'}}}),
+        ]
+        for row in rows:
+            exported = n['scraping_columns'](n['to_frame']([row]))
+            self.assertEqual(exported.username.iloc[0], 'alice')
+            self.assertEqual(exported.comment_text.iloc[0], 'hello')
+        missing = n['parse_instagram']({'payload': {'comments': [{'pk': '1', 'text': 'hello'}]}})[0]
+        self.assertIsNone(missing['username'])
 
     def test_every_cell_compiles(self):
         nb = json.loads((Path(__file__).resolve().parents[1] / 'buzzer.ipynb').read_text(encoding='utf-8'))
@@ -83,6 +108,43 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn('is_verified', parsed[0])
         self.assertEqual(parsed[1]['parent_comment_id'], '1')
 
+    def test_instagram_graphql_capture_coverage_and_export(self):
+        reply = {'id': '2', 'text': 'reply', 'owner': {'username': 'bob'}, 'edge_liked_by': {'count': 0}}
+        comment = {'id': '1', 'text': 'hello', 'owner': {'username': 'alice'},
+                   'created_at': 1700000000, 'edge_liked_by': {'count': 3},
+                   'edge_threaded_comments': {'count': 1, 'edges': [{'node': reply}]}}
+        payload = {'data': {'shortcode_media': {
+            'edge_media_to_caption': {'edges': [{'node': {'id': 'caption', 'text': 'not a comment'}}]},
+            'edge_media_to_parent_comment': {'edges': [{'node': comment}]}}}}
+        h = self.n['Harvester']('instagram')
+        h.target_url = 'https://www.instagram.com/p/POST/'
+        response = SimpleNamespace(url='https://www.instagram.com/graphql/query', status=200,
+            headers={'content-type': 'application/json'}, text=lambda: json.dumps(payload))
+        h._on_response(response)
+        self.assertEqual(h._coverage_snapshot()[0], 2)
+        records = self.n['parse_instagram'](h.captured[0])
+        self.assertEqual([r['post_id'] for r in records], ['1', '2'])
+        self.assertEqual(records[1]['parent_comment_id'], '1')
+        exported = self.n['scraping_columns'](self.n['to_frame'](records))
+        self.assertEqual(exported.username.tolist(), ['alice', 'bob'])
+        self.assertEqual(exported.comment_text.tolist(), ['hello', 'reply'])
+        self.assertEqual(exported.like_count.tolist(), [3, 0])
+        payload = {'data': {'xdt_api__v1__media__media_id__comments__connection': {
+            'edges': [{'node': {'pk': '3', 'text': 'modern', 'user': {'username': 'carol'}}}]}}}
+        h._on_response(response)
+        self.assertEqual(h._coverage_snapshot()[0], 3)
+        payload = {'data': {'viewer': {'id': 'user', 'username': 'not a comment'}}}
+        h._on_response(response)
+        self.assertEqual(len(h.captured), 2)
+
+    def test_instagram_visible_panel_triggers_capture_before_prompt(self):
+        h = SimpleNamespace(platform='instagram', page=Mock(),
+                            _coverage_snapshot=Mock(side_effect=[(0, None), (1, None)]),
+                            _scroll_instagram_comments=Mock(return_value=True))
+        with ThreadPoolExecutor(max_workers=1) as ex, patch('builtins.input', side_effect=AssertionError('unnecessary login prompt')):
+            self.assertTrue(self.n['wait_for_comment_access'](ex, h))
+        h._scroll_instagram_comments.assert_called_once_with(required=False)
+
     def test_x_excludes_root_quotes_and_unrelated_tweets(self):
 
         def tweet(tid, conv, parent=None):
@@ -117,6 +179,40 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(h._at_cap())
         h.captured.append(payload('b'))
         self.assertEqual(h._coverage_snapshot(), (1, 10))
+
+    def test_browser_access_requires_comments_or_explicit_skip(self):
+        n = load_notebook()
+        h = SimpleNamespace(page=SimpleNamespace(wait_for_timeout=lambda ms: None),
+                            _coverage_snapshot=lambda: (0, None))
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            with patch('builtins.input', return_value='s'):
+                self.assertFalse(n['wait_for_comment_access'](ex, h))
+                self.assertIn('skipped', h.stop_reason)
+            def login_and_open_comments(prompt):
+                h._coverage_snapshot = lambda: (2, None)
+                return ''
+            with patch('builtins.input', side_effect=login_and_open_comments) as prompt:
+                self.assertTrue(n['wait_for_comment_access'](ex, h))
+                prompt.assert_called_once()
+            with patch('builtins.input', side_effect=AssertionError('unnecessary prompt')):
+                self.assertTrue(n['wait_for_comment_access'](ex, h))
+
+    def test_instagram_scroll_never_uses_feed_wheel(self):
+        h = self.n['Harvester']('instagram')
+        h.page = Mock()
+        h.page.evaluate.return_value = True
+        h.scroll_comments(max_rounds=2, pause_ms=0)
+        self.assertEqual(h.page.evaluate.call_count, 2)
+        h.page.mouse.wheel.assert_not_called()
+        h.page.mouse.move.assert_not_called()
+        h.page.evaluate.return_value = False
+        with self.assertRaisesRegex(RuntimeError, 'comment panel not found'):
+            h.scroll_comments(max_rounds=1, pause_ms=0)
+        h.page.mouse.wheel.assert_not_called()
+        h.platform = 'x'
+        h.page.viewport_size = {'width': 1440, 'height': 900}
+        h.scroll_comments(max_rounds=1, pause_ms=0)
+        h.page.mouse.wheel.assert_called_once_with(0, 3200)
 
     def test_youtube_reply_pagination_and_comment_id(self):
 
@@ -193,7 +289,7 @@ class PipelineTests(unittest.TestCase):
             csv = path / 'youtube.csv'
             previous = csv.read_bytes()
             self.assertEqual(list(n['load_canonical']('youtube').columns),
-                             ['like_count', 'reply_count', 'date_published'])
+                             ['username', 'comment_text', 'like_count', 'reply_count', 'date_published'])
             n['YT_VIDEO_IDS'] = ['missing']
             self.assertIsNone(n['run_youtube_collection']())
             self.assertEqual(csv.read_bytes(), previous)
