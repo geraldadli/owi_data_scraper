@@ -82,6 +82,9 @@ Each exported row represents one comment or reply, with exactly these columns:
 Comments containing GIFs, stickers, images, video, audio or other detected attachments are
 excluded. A top-level media comment also excludes its entire reply thread. A media reply
 excludes only that row. Plain text and emoji remain eligible. No media column is exported.
+Text alongside a GIF/sticker/attachment does not make a comment eligible; empty comments
+are excluded too. TikTok/Instagram skip opening reply threads whose parent is identified
+as media from captured comment metadata, then continue to the next parent.
 Filtering uses attachment metadata supplied by the platform; undetected media cannot be filtered.
 
 Reply threads are expanded while scrolling, including Instagram's “Lihat semua 3 balasan”

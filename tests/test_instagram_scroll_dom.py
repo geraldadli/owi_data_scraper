@@ -30,7 +30,9 @@ class InstagramScrollTests(unittest.TestCase):
             try:
                 page = browser.new_page()
                 for platform in ('tiktok', 'instagram'):
-                    page.set_content('''<div style="height:300px;overflow:auto">
+                    page.set_content('''<base href="https://www.tiktok.com/"><div style="height:300px;overflow:auto">
+                      <div id="media"><a href="/media_user/">Media user</a><p>Text with GIF</p><img alt="GIF">
+                        <button onclick="window.order.push('media')">View replies (99)</button></div>
                       <div id="a"><a href="/alice/">Alice</a><button onclick="window.order.push('hide')">Sembunyikan</button><button onclick="more(this)">View replies (68)</button></div>
                       <div id="b"><a href="/bob/">Bob</a><button onclick="window.order.push('b');this.remove()">View replies (1)</button></div>
                       <script>window.order=[];window.pages=0;
@@ -41,6 +43,7 @@ class InstagramScrollTests(unittest.TestCase):
                     page.evaluate("value => window.useIndonesian = value", platform == "tiktok")
                     h = Collector()
                     h.platform = platform
+                    h._media_parents = {'media': {'post_id': 'media', 'username': 'media_user', 'comment_text': 'Text with GIF'}}
                     h.page = SimpleNamespace(locator=page.locator, wait_for_timeout=lambda ms: page.wait_for_timeout(10))
                     h._wait_for_growth = lambda ms: None
                     h._at_cap = lambda: True

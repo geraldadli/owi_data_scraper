@@ -142,13 +142,14 @@ class PipelineTests(unittest.TestCase):
     def test_media_comments_and_only_media_parent_threads_are_excluded(self):
         n = self.n
         make = n['empty_record']
-        rows = [make(post_id='root', source_post_id='v', _has_media=True),
+        rows = [make(post_id='root', source_post_id='v', _has_media=True, comment_text='Text with GIF'),
                 make(post_id='reply', source_post_id='v', parent_comment_id='root'),
                 make(post_id='nested', source_post_id='v', parent_comment_id='reply'),
                 make(post_id='text', source_post_id='v', comment_text='hello'),
                 make(post_id='gifreply', source_post_id='v', parent_comment_id='text', _has_media=True),
                 make(post_id='keep', source_post_id='v', parent_comment_id='gifreply', comment_text='text reply'),
-                make(post_id='root', source_post_id='other', comment_text='another video')]
+                make(post_id='root', source_post_id='other', comment_text='another video'),
+                make(post_id='blank', source_post_id='v', comment_text='   ')]
         out = n['to_frame'](list(reversed(rows)))
         self.assertEqual(set(zip(out.source_post_id, out.post_id)), {('v', 'text'), ('v', 'keep'), ('other', 'root')})
         self.assertNotIn('_has_media', n['scraping_columns'](out).columns)
@@ -199,7 +200,7 @@ class PipelineTests(unittest.TestCase):
             self.assertIsNone(re.search(pattern, label, re.I))
         h = n['Harvester']('tiktok')
         h.page = Mock()
-        controls = h.page.locator.return_value.filter.return_value
+        controls = h.page.locator.return_value.filter.return_value.locator.return_value
         controls.count.return_value = 1
         h._drain_reply_thread = Mock(side_effect=RuntimeError('stale control'))
         with self.assertRaisesRegex(RuntimeError, 'collection stopped'):
@@ -209,9 +210,9 @@ class PipelineTests(unittest.TestCase):
         controls.count.side_effect = [1, 0, 0, 0]
         h._at_cap = Mock(return_value=True)
         self.assertEqual(h.expand_replies(max_clicks=1000), 25)
-        rows = [n['empty_record'](post_id='root', source_post_id='v', thread_id='root', reply_count=68),
-                n['empty_record'](post_id='a', source_post_id='v', thread_id='root', parent_comment_id='root'),
-                n['empty_record'](post_id='b', source_post_id='v', thread_id='root', parent_comment_id='a')]
+        rows = [n['empty_record'](post_id='root', source_post_id='v', thread_id='root', reply_count=68, comment_text='root text'),
+                n['empty_record'](post_id='a', source_post_id='v', thread_id='root', parent_comment_id='root', comment_text='reply'),
+                n['empty_record'](post_id='b', source_post_id='v', thread_id='root', parent_comment_id='a', comment_text='nested reply')]
         with patch('builtins.print'):
             gaps = n['report_tiktok_reply_gaps'](n['to_frame'](rows))
         self.assertEqual(gaps, [('root', 2, 68)])
@@ -461,7 +462,7 @@ class PipelineTests(unittest.TestCase):
             return SimpleNamespace(execute=execute)
 
         def top(cid, replies=0):
-            return {'snippet': {'topLevelComment': {'id': cid, 'snippet': {'likeCount': 2}},
+            return {'snippet': {'topLevelComment': {'id': cid, 'snippet': {'likeCount': 2, 'textOriginal': 'text comment'}},
                                 'totalReplyCount': replies}}
 
         class API:
