@@ -1,2 +1,4 @@
 .env
 buzzer_data/
+__pycache__/
+*.pyc

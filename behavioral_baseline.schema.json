@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Buzzer behavioral baseline: account-window record",
+  "description": "Version 1.0.0. Exactly 13 behavioral features; identity, platform, observation window and feature status are metadata. Null represents unavailable evidence, never measured zero.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "account_id",
+    "platform",
+    "window_start",
+    "window_end",
+    "features",
+    "feature_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "account_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Platform-qualified stable account ID; excluded from predictors."
+    },
+    "platform": {
+      "enum": [
+        "tiktok",
+        "instagram",
+        "x",
+        "facebook",
+        "youtube"
+      ]
+    },
+    "window_start": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Inclusive UTC observation cutoff, configured by the collection/modeling plan."
+    },
+    "window_end": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Exclusive UTC observation cutoff; must be later than window_start."
+    },
+    "features": {
+      "$ref": "#/$defs/features"
+    },
+    "feature_status": {
+      "type": "object",
+      "description": "One status per behavioral feature. observed requires a numeric value; every other status requires null. Validate these cross-field constraints in application code.",
+      "minProperties": 13,
+      "maxProperties": 13,
+      "propertyNames": {
+        "enum": [
+          "mean_comment_length_chars",
+          "mean_hashtags_per_comment",
+          "mean_mentions_per_comment",
+          "mean_urls_per_comment",
+          "reply_ratio",
+          "repeated_comment_ratio",
+          "shared_comment_ratio",
+          "comment_count",
+          "source_post_count",
+          "recurring_peer_count",
+          "max_peer_overlap_ratio",
+          "median_comment_interval_seconds",
+          "comment_interval_burstiness"
+        ]
+      },
+      "additionalProperties": {
+        "enum": [
+          "observed",
+          "structural_missing",
+          "collection_failed",
+          "insufficient_support",
+          "computation_skipped",
+          "unknown"
+        ]
+      }
+    },
+    "profile_visibility": {
+      "enum": [
+        "public",
+        "private",
+        "unknown"
+      ],
+      "description": "Audit metadata; determined only from an explicit privacy flag."
+    },
+    "profile_access_status": {
+      "enum": [
+        "readable",
+        "restricted",
+        "failed",
+        null
+      ],
+      "description": "Latest profile check; null means not checked. Restricted means explicitly private content, even if its basic profile header is readable."
+    },
+    "profile_checked_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "description": "UTC check time; distinct from the observation time of older cached statistics."
+    }
+  },
+  "$defs": {
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mean_comment_length_chars",
+        "mean_hashtags_per_comment",
+        "mean_mentions_per_comment",
+        "mean_urls_per_comment",
+        "reply_ratio",
+        "repeated_comment_ratio",
+        "shared_comment_ratio",
+        "comment_count",
+        "source_post_count",
+        "recurring_peer_count",
+        "max_peer_overlap_ratio",
+        "median_comment_interval_seconds",
+        "comment_interval_burstiness"
+      ],
+      "properties": {
+        "mean_comment_length_chars": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Mean Unicode code-point length of clean_text across sampled comments. Requires usable text extraction; an observed empty text has length zero.",
+          "x-notebook-column": "text_length_mean",
+          "x-linear-transform": "log1p"
+        },
+        "mean_hashtags_per_comment": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Mean extracted hashtag occurrences per sampled comment. No observed hashtags is zero; unavailable text/entity extraction is null.",
+          "x-notebook-column": "hashtag_count_mean",
+          "x-linear-transform": "log1p"
+        },
+        "mean_mentions_per_comment": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Mean extracted mention occurrences per sampled comment; availability rules match hashtag counts.",
+          "x-notebook-column": "mention_count_mean",
+          "x-linear-transform": "log1p"
+        },
+        "mean_urls_per_comment": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Mean extracted URL occurrences per sampled comment. Counts occurrences, not unique domains.",
+          "x-notebook-column": "url_count_mean",
+          "x-linear-transform": "log1p"
+        },
+        "reply_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Reply comments / comments with known reply status. Null when no statuses are observed; retain known-status support separately.",
+          "x-notebook-column": "reply_fraction",
+          "x-linear-transform": "identity"
+        },
+        "repeated_comment_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of sampled comments belonging to a nonempty normalized-text group occurring at least twice for this account in the window. Includes the first copy. A,A,B gives 2/3.",
+          "x-notebook-column": "repeated_text_fraction",
+          "x-linear-transform": "identity"
+        },
+        "shared_comment_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of sampled comments whose normalized text occurs for another account in the permitted same-platform corpus/window and has at least 12 word characters. Text/corpus availability must be validated; generic or unshared observed text contributes zero.",
+          "x-notebook-column": "shared_text_fraction",
+          "x-linear-transform": "identity"
+        },
+        "comment_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Number of unique sampled comments for this account in the window after snapshot deduplication. A normal account-window row requires at least one comment; null is reserved for failed/imported observations that must be quarantined before training.",
+          "x-notebook-column": "n_comments",
+          "x-linear-transform": "log1p"
+        },
+        "source_post_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Number of distinct known source videos/posts. Null when no source identities are usable; never interpret missing source IDs as zero activity. Retain source-ID completeness separately.",
+          "x-notebook-column": "n_source_posts",
+          "x-linear-transform": "log1p"
+        },
+        "recurring_peer_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Number of other same-platform accounts sharing at least two sampled source posts with this account. Requires at least two observed source posts and a complete permitted pair calculation; otherwise null.",
+          "x-notebook-column": "post_co_partners",
+          "x-linear-transform": "log1p"
+        },
+        "max_peer_overlap_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Maximum qualifying pair's shared-source-post count / this account's observed source-post count. Qualifying pairs share at least two posts. Zero if no pair qualifies and support/calculation are sufficient; otherwise null. This is asymmetric, not Jaccard similarity.",
+          "x-notebook-column": "post_co_rate",
+          "x-linear-transform": "identity"
+        },
+        "median_comment_interval_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Median consecutive interval between this account's valid UTC comment timestamps in the window. Requires at least two valid timestamps; same-timestamp intervals may be observed zero.",
+          "x-notebook-column": "median_intercomment_seconds",
+          "x-linear-transform": "log1p"
+        },
+        "comment_interval_burstiness": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": -1,
+          "maximum": 1,
+          "description": "(sample_std(intervals)-mean(intervals))/(sample_std(intervals)+mean(intervals)), using ddof=1. Requires at least three intervals/four timestamps and a positive denominator. Zero is a measured balance, not a missing-value sentinel.",
+          "x-notebook-column": "intercomment_burstiness",
+          "x-linear-transform": "identity"
+        }
+      }
+    }
+  }
+}
